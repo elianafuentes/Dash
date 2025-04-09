@@ -1,20 +1,69 @@
 import dash
 from dash import dcc, html
 import plotly.express as px
+import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
-import dash_leaflet as dl
-import geopandas as gpd
-import os  # Import os module
+import json
+import os
 
 # Inicializar app
 app = dash.Dash(__name__)
 server = app.server  # Importante para Render
 app.title = "Dashboard GNCV"
 
+# Función para convertir datos a GeoJSON
+def convert_to_geojson(df, lat_col, lon_col, properties_cols):
+    """
+    Convierte un DataFrame con coordenadas a formato GeoJSON.
+    
+    Args:
+        df: DataFrame con datos
+        lat_col: Nombre de la columna con latitudes
+        lon_col: Nombre de la columna con longitudes
+        properties_cols: Lista de columnas a incluir como propiedades
+        
+    Returns:
+        Diccionario con estructura GeoJSON
+    """
+    features = []
+    
+    # Filtrar filas sin coordenadas
+    valid_df = df.dropna(subset=[lat_col, lon_col])
+    
+    for _, row in valid_df.iterrows():
+        # Crear propiedades del feature
+        properties = {}
+        for col in properties_cols:
+            # Convertir valores no serializables a string
+            if isinstance(row[col], (pd.Timestamp, np.integer, np.floating, np.bool_)):
+                properties[col] = str(row[col])
+            else:
+                properties[col] = row[col]
+        
+        # Crear feature
+        feature = {
+            "type": "Feature",
+            "geometry": {
+                "type": "Point",
+                "coordinates": [float(row[lon_col]), float(row[lat_col])]
+            },
+            "properties": properties
+        }
+        
+        features.append(feature)
+    
+    # Crear estructura GeoJSON
+    geojson = {
+        "type": "FeatureCollection",
+        "features": features
+    }
+    
+    return geojson
+
 # Cargar datos
 try:
-    # Ajusta esta ruta según donde tengas tu archivo
+    # Ruta del archivo CSV
     csv_path = "Consulta_Precios_Promedio_de_Gas_Natural_Comprimido_Vehicular__AUTOMATIZADO__20250314.csv"
     df = pd.read_csv(csv_path, encoding="latin1")
     
@@ -53,142 +102,74 @@ try:
     corr_matrix = df.select_dtypes(include=np.number).corr().round(2)
     fig_corr = px.imshow(corr_matrix, text_auto=True, color_continuous_scale='RdBu_r', title="Matriz de Correlación")
     
+    # -------------------------
+    # MAPA CON GEOJSON
+    # -------------------------
+    ultimo_mes = df[fecha_col].max()
+    df_ultimo_mes = df[df[fecha_col] == ultimo_mes]
+    
+    # Convertir datos a GeoJSON y guardar en archivo
+    propiedades = ['MUNICIPIO_EDS', 'DEPARTAMENTO_EDS', precio_col]
+    geojson_data = convert_to_geojson(df_ultimo_mes, 'LATITUD_MUNICIPIO', 'LONGITUD_MUNICIPIO', propiedades)
+    
+    # Guardar GeoJSON en archivo (opcional)
+    geojson_path = 'municipios_precios.geojson'
+    with open(geojson_path, 'w') as f:
+        json.dump(geojson_data, f)
+    
+    # Crear mapa Choropleth con GeoJSON generado
+    fig_mapa = px.choropleth_mapbox(
+        df_ultimo_mes,
+        geojson=geojson_data,
+        locations=df_ultimo_mes.index,  # Usar índice como identificador
+        color=precio_col,
+        color_continuous_scale="sunsetdark",
+        mapbox_style="carto-positron",
+        zoom=4.5,
+        center={"lat": 4.57, "lon": -74.3},
+        opacity=0.7,
+        hover_name="MUNICIPIO_EDS",
+        hover_data=[departamento_col, precio_col],
+        title=f"📍 Precios de GNCV por Municipio - {ultimo_mes.strftime('%B %Y')}"
+    )
+    
+    # Si el mapa choropleth no funciona bien, crear mapa de dispersión como respaldo
+    fig_mapa_scatter = px.scatter_mapbox(
+        df_ultimo_mes.dropna(subset=['LATITUD_MUNICIPIO', 'LONGITUD_MUNICIPIO']),
+        lat="LATITUD_MUNICIPIO",
+        lon="LONGITUD_MUNICIPIO",
+        color=precio_col,
+        size=[10] * len(df_ultimo_mes),  # Tamaño fijo para todos los puntos
+        color_continuous_scale="sunsetdark",
+        zoom=4.5,
+        mapbox_style="carto-positron",
+        hover_name="MUNICIPIO_EDS",
+        hover_data=[departamento_col, precio_col],
+        title=f"📍 Precios de GNCV por Municipio - {ultimo_mes.strftime('%B %Y')}"
+    )
+    
+    # Seleccionar el mapa que se usará (descomentar la línea según el mapa preferido)
+    # fig_mapa_final = fig_mapa  # Usar mapa choropleth
+    fig_mapa_final = fig_mapa_scatter  # Usar mapa de dispersión
+    
     graficos_disponibles = True
     
 except Exception as e:
     print(f"Error al cargar datos o crear gráficos: {e}")
     graficos_disponibles = False
 
-
-try:
-    possible_paths = [
-        "/Users/elianafuentes/Documents/app/COLOMBIA/COLOMBIA.SHP",  # Tu ruta original
-        "COLOMBIA/COLOMBIA.shp",
-        os.path.join(os.path.dirname(__file__), "COLOMBIA", "COLOMBIA.shp"),
-        os.path.join(os.path.dirname(__file__), "COLOMBIA", "COLOMBIA.SHP"),
-        os.path.join(os.path.dirname(__file__), "COLOMBIA", "COLOMBIA.SHP")
-    ]
-
-    # Buscar el archivo en rutas posibles
-    shapefile_path = None
-    for path in possible_paths:
-        if os.path.exists(path):
-            shapefile_path = path
-            break
-
-    if shapefile_path is None:
-        raise FileNotFoundError("No se encontró el archivo shapefile en ninguna de las rutas especificadas.")
-
-    # Cargar el shapefile
-    gdf_colombia = gpd.read_file(shapefile_path, encoding="latin1")
-
-    departamento_geo_col = 'DPTO_CNMBR'  # Ajusta según el nombre de la columna en tu shapefile
-
-    # Normalización de nombres de departamentos para los mapas
-    df[departamento_col] = df[departamento_col].str.upper().str.normalize('NFKD').str.encode('ascii', errors='ignore').str.decode('utf-8')
-    gdf_colombia[departamento_geo_col] = gdf_colombia[departamento_geo_col].str.upper().str.normalize('NFKD').str.encode('ascii', errors='ignore').str.decode('utf-8')
-
-    # Datos para los mapas
-    ultimo_mes = df[fecha_col].max()
-    primer_mes = df[fecha_col].min()
-    df_ultimo_mes = df[df[fecha_col] == ultimo_mes]
-    df_primer_mes = df[df[fecha_col] == primer_mes]
-
-    # Mapa 1: Precios por Departamento
-    precio_por_dpto = df_ultimo_mes.groupby(departamento_col)[precio_col].mean().reset_index()
-    gdf_merged = gdf_colombia.merge(precio_por_dpto, left_on=departamento_geo_col, right_on=departamento_col, how='left')
-    gdf_merged = gdf_merged.to_crs("EPSG:4326")
-    gdf_json = gdf_merged.__geo_interface__
-
-    fig_mapa1 = px.choropleth(
-        gdf_merged,
-        geojson=gdf_json,
-        locations=departamento_geo_col,
-        featureidkey=f"properties.{departamento_geo_col}",
-        color=precio_col,
-        color_continuous_scale="sunsetdark",
-        labels={precio_col: "Precio Promedio (COP)"},
-        title=f"📍 Precios de GNCV por Departamento - {ultimo_mes.strftime('%B %Y')}",
-        hover_data={departamento_col: True, precio_col: ":,.0f"}
-    )
-    fig_mapa1.update_geos(fitbounds="locations", visible=False)
-    fig_mapa1.update_layout(margin={"r":0,"t":50,"l":0,"b":0}, template="plotly_white")
-
-    # Mapa 2: Puntos en municipios
-    puntos = df_ultimo_mes[["MUNICIPIO_EDS", "DEPARTAMENTO_EDS", precio_col, "LATITUD_MUNICIPIO", "LONGITUD_MUNICIPIO"]].dropna()
-    markers = [
-        dl.CircleMarker(
-            center=(row["LATITUD_MUNICIPIO"], row["LONGITUD_MUNICIPIO"]),
-            radius=5,
-            color="black",
-            fillColor="orange",
-            fillOpacity=0.8,
-            children=dl.Tooltip(f"{row['MUNICIPIO_EDS']} ({row['DEPARTAMENTO_EDS']}): ${row[precio_col]:,.0f}")
-        )
-        for _, row in puntos.iterrows()
-    ]
-
-    mapa2 = dl.Map(center=[4.57, -74.3], zoom=6, children=[
-        dl.TileLayer(),
-        dl.LayerGroup(markers)
-    ], style={'width': '100%', 'height': '500px'})
-
-    # Mapa 3: Variación Porcentual
-    precio_inicial = df_primer_mes.groupby(departamento_col)[precio_col].mean().reset_index()
-    precio_inicial.rename(columns={precio_col: 'precio_inicial'}, inplace=True)
-    precio_final = df_ultimo_mes.groupby(departamento_col)[precio_col].mean().reset_index()
-    precio_final.rename(columns={precio_col: 'precio_final'}, inplace=True)
-    precio_comparacion = precio_inicial.merge(precio_final, on=departamento_col)
-    precio_comparacion['variacion_porcentual'] = ((precio_comparacion['precio_final'] - precio_comparacion['precio_inicial']) / precio_comparacion['precio_inicial']) * 100
-    gdf_variacion = gdf_colombia.merge(precio_comparacion, left_on=departamento_geo_col, right_on=departamento_col, how='left')
-    gdf_variacion = gdf_variacion.to_crs("EPSG:4326")
-    gdf_var_json = gdf_variacion.__geo_interface__
-
-    vmax = max(abs(gdf_variacion['variacion_porcentual'].min()), abs(gdf_variacion['variacion_porcentual'].max()))
-
-    fig_mapa3 = px.choropleth(
-        gdf_variacion,
-        geojson=gdf_var_json,
-        locations=departamento_geo_col,
-        featureidkey=f"properties.{departamento_geo_col}",
-        color='variacion_porcentual',
-        color_continuous_scale="RdBu",
-        range_color=[-vmax, vmax],
-        labels={"variacion_porcentual": "Variación (%)"},
-        title=f"📊 Variación Porcentual del Precio de GNCV ({primer_mes.strftime('%B %Y')} - {ultimo_mes.strftime('%B %Y')})",
-        hover_data={departamento_col: True, 'variacion_porcentual': ".2f"}
-    )
-    fig_mapa3.update_geos(fitbounds="locations", visible=False)
-    fig_mapa3.update_layout(margin={"r":0,"t":50,"l":0,"b":0}, template="plotly_white")
-    
-    mapas_disponibles = True
-except FileNotFoundError as e:
-    print(f"Error al cargar el archivo shapefile: {e}")
-    mapas_disponibles = False
-except Exception as e:
-    print(f"Error al crear mapas: {e}")
-    mapas_disponibles = False
-finally:
-    print("Finalización del bloque try-except para mapas.")
-
 # Construir pestañas
 tabs = []
 
-# Añadir pestañas de mapas si están disponibles
-if mapas_disponibles:
-    tabs.extend([
-        dcc.Tab(label="📍 Mapa por Departamento", children=[
-            dcc.Graph(figure=fig_mapa1)
-        ]),
-        dcc.Tab(label="📌 Mapa por Municipio (Puntos)", children=[
-            html.Div(mapa2, style={"padding": "1rem"})
-        ]),
-        dcc.Tab(label="📊 Variación de Precios", children=[
-            dcc.Graph(figure=fig_mapa3)
+# Añadir pestaña de mapa
+if graficos_disponibles:
+    tabs.append(
+        dcc.Tab(label="📍 Mapa de Precios", children=[
+            dcc.Graph(figure=fig_mapa_final)
         ])
-    ])
+    )
 
-# Añadir pestañas de gráficos estadísticos si están disponibles
+# Añadir pestañas de gráficos estadísticos
 if graficos_disponibles:
     tabs.extend([
         dcc.Tab(label='Histograma', children=[dcc.Graph(figure=fig_hist)]),
@@ -206,7 +187,7 @@ if len(tabs) > 0:
     app.layout = html.Div([
         html.H1("📈 Análisis de Precios de GNCV en Colombia", style={"textAlign": "center"}),
         html.Div([
-            html.P("Análisis geoespacial y estadístico de precios de GNCV", 
+            html.P("Análisis estadístico y geoespacial de precios de GNCV", 
                   style={"textAlign": "center", "fontStyle": "italic"})
         ]),
         dcc.Tabs(tabs)
@@ -215,11 +196,9 @@ else:
     # Mostrar mensaje de error si no hay datos disponibles
     app.layout = html.Div([
         html.H1("Error al cargar el Dashboard", style={"textAlign": "center", "color": "red"}),
-        html.P("No se pudieron cargar los datos necesarios. Verifica que los archivos estén en las rutas correctas.", 
+        html.P("No se pudieron cargar los datos necesarios. Verifica que el archivo CSV está en la ruta correcta.", 
                style={"textAlign": "center"})
     ])
-    
-
 
 # Ejecutar el servidor
 if __name__ == '__main__':
